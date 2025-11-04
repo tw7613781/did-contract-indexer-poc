@@ -179,9 +179,10 @@ export class DIDIndexer {
     const calls: string[] = [];
 
     // Encode getMetadata and ownerOf calls for each token
+    // Use full function signatures to avoid ambiguity with overloaded functions
     for (const tokenId of tokenIds) {
-      calls.push(this.contractInterface.encodeFunctionData('getMetadata', [tokenId]));
-      calls.push(this.contractInterface.encodeFunctionData('ownerOf', [tokenId]));
+      calls.push(this.contractInterface.encodeFunctionData('getMetadata(uint256)', [tokenId]));
+      calls.push(this.contractInterface.encodeFunctionData('ownerOf(uint256)', [tokenId]));
     }
 
     // Execute multicall with retry
@@ -194,11 +195,11 @@ export class DIDIndexer {
       const ownerResult = results[i * 2 + 1];
 
       const metadata = this.contractInterface.decodeFunctionResult(
-        'getMetadata',
+        'getMetadata(uint256)',
         metadataResult
       )[0] as ContractMetadata;
 
-      const owner = this.contractInterface.decodeFunctionResult('ownerOf', ownerResult)[0];
+      const owner = this.contractInterface.decodeFunctionResult('ownerOf(uint256)', ownerResult)[0];
 
       domains.push({
         id: tokenIds[i],
@@ -220,7 +221,8 @@ export class DIDIndexer {
   private async executeMulticallWithRetry(calls: string[]): Promise<string[]> {
     for (let attempt = 1; attempt <= this.config.retryAttempts; attempt++) {
       try {
-        return await this.contract.multicall(calls);
+        // Use staticCall to force read-only call instead of transaction
+        return await this.contract.multicall.staticCall(calls);
       } catch (error) {
         if (attempt === this.config.retryAttempts) {
           console.error(`❌ Multicall failed after ${attempt} attempts`);
@@ -292,41 +294,15 @@ export class DIDIndexer {
     concurrency: number
   ): Promise<R[]> {
     const results: R[] = [];
-    const executing: Promise<void>[] = [];
-    let index = 0;
-
-    for (const item of items) {
-      const promise = fn(item).then((result) => {
-        results[index] = result;
-      });
-
-      index++;
-      executing.push(promise);
-
-      if (executing.length >= concurrency) {
-        await Promise.race(executing);
-        // Remove completed promises
-        for (let i = executing.length - 1; i >= 0; i--) {
-          if (await this.isPromiseSettled(executing[i])) {
-            executing.splice(i, 1);
-          }
-        }
-      }
+    
+    // Process items in chunks based on concurrency
+    for (let i = 0; i < items.length; i += concurrency) {
+      const chunk = items.slice(i, i + concurrency);
+      const chunkResults = await Promise.all(chunk.map(item => fn(item)));
+      results.push(...chunkResults);
     }
-
-    await Promise.all(executing);
+    
     return results;
-  }
-
-  /**
-   * Check if promise is settled
-   */
-  private async isPromiseSettled(promise: Promise<void>): Promise<boolean> {
-    const checkPromise = Promise.race([
-      promise.then(() => true),
-      Promise.resolve(false),
-    ]);
-    return checkPromise;
   }
 
   /**
